@@ -35,10 +35,12 @@ namespace Mindscape.Raygun4Net.EnvironmentProviders
       return new List<double>();
     }
 
+    // Filters run cheapest-first with && so drives we don't report are never probed: IsReady (and on Unix, DriveType)
+    // touch the drive and can block for a long time on an unreachable network drive or mount.
     private static List<double> GetOnWindows()
     {
       return DriveInfo.GetDrives()
-        .Where(x => x.IsReady && x.DriveType == DriveType.Fixed)
+        .Where(x => x.DriveType == DriveType.Fixed && x.IsReady)
         .Select(d => (double)d.AvailableFreeSpace)
         .ToList();
     }
@@ -46,7 +48,7 @@ namespace Mindscape.Raygun4Net.EnvironmentProviders
     private static List<double> GetOnLinux()
     {
       return DriveInfo.GetDrives()
-        .Where(x => x is { IsReady: true, DriveType: DriveType.Fixed, Name: "/" })
+        .Where(x => x.Name == "/" && x.DriveType == DriveType.Fixed && x.IsReady)
         .Select(d => (double)d.AvailableFreeSpace)
         .ToList();
     }
@@ -54,7 +56,7 @@ namespace Mindscape.Raygun4Net.EnvironmentProviders
     private static List<double> GetOnMacOS()
     {
       return DriveInfo.GetDrives()
-        .Where(x => x is { IsReady: true, DriveType: DriveType.Fixed, Name: "/" })
+        .Where(x => x.Name == "/" && x.DriveType == DriveType.Fixed && x.IsReady)
         .Select(d => (double)d.AvailableFreeSpace)
         .ToList();
     }

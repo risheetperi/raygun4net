@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 
 namespace Mindscape.Raygun4Net.NetCore.Tests
 {
@@ -90,6 +91,106 @@ namespace Mindscape.Raygun4Net.NetCore.Tests
       Assert.That(message.Details.Environment.TotalPhysicalMemory, Is.Not.Zero);
       Assert.That(message.Details.Environment.AvailableVirtualMemory, Is.Not.Zero);
       Assert.That(message.Details.Environment.TotalVirtualMemory, Is.Not.Zero);
+    }
+
+    [Test]
+    public void EnvironmentBuild_WhenRefreshInProgressOnAnotherThread_ReturnsCachedValuesWithoutWaiting()
+    {
+      RaygunEnvironmentMessageBuilder.Build(_settings);
+      var staleUpdate = DateTime.UtcNow.AddMinutes(-5);
+      RaygunEnvironmentMessageBuilder.LastUpdate = staleUpdate;
+
+      RaygunEnvironmentMessageBuilder.Semaphore.Wait();
+      try
+      {
+        var build = Task.Run(() => RaygunEnvironmentMessageBuilder.Build(_settings));
+
+        build.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue("Build should not wait for another thread's refresh");
+        build.Result.Should().NotBeNull();
+        RaygunEnvironmentMessageBuilder.LastUpdate.Should().Be(staleUpdate);
+      }
+      finally
+      {
+        RaygunEnvironmentMessageBuilder.Semaphore.Release();
+      }
+    }
+
+    [Test]
+    public void EnvironmentBuild_WhenFirstRefreshInProgressOnAnotherThread_ReturnsEmptyDiskSpaceWithoutThrowing()
+    {
+      // Simulates the state of a fresh process: no refresh has completed yet, so the cached disk space is unset
+      GetCachedEnvironmentMessage().DiskSpaceFree = null;
+      RaygunEnvironmentMessageBuilder.LastUpdate = DateTime.MinValue;
+
+      RaygunEnvironmentMessageBuilder.Semaphore.Wait();
+      try
+      {
+        var build = Task.Run(() => RaygunEnvironmentMessageBuilder.Build(_settings));
+
+        build.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue("Build should not wait for another thread's refresh");
+        build.Result.DiskSpaceFree.Should().NotBeNull().And.BeEmpty();
+      }
+      finally
+      {
+        RaygunEnvironmentMessageBuilder.Semaphore.Release();
+        RaygunEnvironmentMessageBuilder.LastUpdate = DateTime.MinValue;
+      }
+    }
+
+    [Test]
+    public void EnvironmentBuild_WhenRefreshInProgressOnAnotherThread_DoesNotReleaseSemaphore()
+    {
+      RaygunEnvironmentMessageBuilder.Build(_settings);
+      RaygunEnvironmentMessageBuilder.LastUpdate = DateTime.UtcNow.AddMinutes(-5);
+
+      RaygunEnvironmentMessageBuilder.Semaphore.Wait();
+      try
+      {
+        Task.Run(() => RaygunEnvironmentMessageBuilder.Build(_settings)).Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+
+        RaygunEnvironmentMessageBuilder.Semaphore.CurrentCount.Should().Be(0);
+      }
+      finally
+      {
+        RaygunEnvironmentMessageBuilder.Semaphore.Release();
+      }
+    }
+
+    [Test]
+    public void EnvironmentBuild_WhenCacheIsStaleAndNoRefreshInProgress_RefreshesCache()
+    {
+      RaygunEnvironmentMessageBuilder.Build(_settings);
+      RaygunEnvironmentMessageBuilder.LastUpdate = DateTime.UtcNow.AddMinutes(-5);
+
+      RaygunEnvironmentMessageBuilder.Build(_settings);
+
+      RaygunEnvironmentMessageBuilder.LastUpdate.Should().BeCloseTo(DateTime.UtcNow, TimeSpan.FromSeconds(10));
+    }
+
+    [Test]
+    public void EnvironmentBuild_AfterRefresh_ReleasesSemaphore()
+    {
+      RaygunEnvironmentMessageBuilder.Build(_settings);
+
+      RaygunEnvironmentMessageBuilder.Semaphore.CurrentCount.Should().Be(1);
+    }
+
+    [Test]
+    public void EnvironmentBuild_ModifyingReturnedDiskSpace_DoesNotAffectLaterMessages()
+    {
+      var first = RaygunEnvironmentMessageBuilder.Build(_settings);
+      var diskCount = first.DiskSpaceFree.Count;
+
+      first.DiskSpaceFree.Add(123);
+
+      RaygunEnvironmentMessageBuilder.Build(_settings).DiskSpaceFree.Should().HaveCount(diskCount);
+    }
+
+    private static RaygunEnvironmentMessage GetCachedEnvironmentMessage()
+    {
+      return (RaygunEnvironmentMessage)typeof(RaygunEnvironmentMessageBuilder)
+        .GetField("CachedMessage", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
+        .GetValue(null)!;
     }
 
     // Response tests

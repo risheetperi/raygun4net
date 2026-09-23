@@ -77,7 +77,53 @@ namespace Mindscape.Raygun4Net.NetCore.Tests
       await _mockHttp.VerifyAsync(match => match.Method(HttpMethod.Post)
         .RequestUri("https://api.raygun.com/entries"), IsSent.Exactly(50));
     }
-    
+
+    [Test]
+    public async Task SendInBackground_WhenFirstEnvironmentRefreshInProgress_StillSendsMessage()
+    {
+      _mockHttp.When(match => match.Method(HttpMethod.Post)
+        .RequestUri("https://api.raygun.com/entries"))
+        .Respond(x =>
+        {
+          x.Body("OK");
+          x.StatusCode(HttpStatusCode.Accepted);
+        }).Verifiable();
+
+      _httpClient = new HttpClient(_mockHttp);
+
+      var client = new BananaClient(new RaygunSettings
+      {
+        ApiKey = "banana"
+      }, _httpClient);
+
+      // Simulates #584: another thread is stuck in the first environment refresh (e.g. probing an unreachable drive)
+      var cachedMessage = (RaygunEnvironmentMessage)typeof(RaygunEnvironmentMessageBuilder)
+        .GetField("CachedMessage", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
+        .GetValue(null)!;
+      cachedMessage.DiskSpaceFree = null;
+      RaygunEnvironmentMessageBuilder.LastUpdate = DateTime.MinValue;
+
+      RaygunEnvironmentMessageBuilder.Semaphore.Wait();
+      try
+      {
+        var send = Task.Run(() => client.SendInBackground(new Exception("Test Exception while environment refresh is in progress")));
+
+        (await Task.WhenAny(send, Task.Delay(TimeSpan.FromSeconds(5)))).Should().Be(send, "SendInBackground should not wait for another thread's refresh");
+        await send;
+
+        // Delay 1 second to give it time to send the message
+        await Task.Delay(1000);
+      }
+      finally
+      {
+        RaygunEnvironmentMessageBuilder.Semaphore.Release();
+        RaygunEnvironmentMessageBuilder.LastUpdate = DateTime.MinValue;
+      }
+
+      await _mockHttp.VerifyAsync(match => match.Method(HttpMethod.Post)
+        .RequestUri("https://api.raygun.com/entries"), IsSent.Exactly(1));
+    }
+
     [Test]
     public async Task SendInBackground_ShouldFail_WhenMaxTasksIsZero()
     {

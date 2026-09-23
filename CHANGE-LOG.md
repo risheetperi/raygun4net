@@ -9,6 +9,10 @@
   - XFF/REMOTE_ADDR acceptance requires canonical four-octet IPv4 values and strict port validation; masking still best-effort redacts the host when a port suffix is malformed
   - AspNetCore: unmasked IPv6+port keeps the historical `addr:port` shape; masked IPv6+port uses unambiguous `[addr]:port`
   - See: https://github.com/MindscapeHQ/raygun4net/pull/583
+- Fix: #584 - `SendInBackground` could block indefinitely while collecting disk space on Windows when a mapped network drive was unavailable
+  - Mindscape.Raygun4Net.NetCore.Common: disk-space collection checks the cheap drive filters first, so drives that are not reported (e.g. network drives, non-root mounts) are no longer probed for readiness
+  - Mindscape.Raygun4Net.NetCore.Common: reports no longer wait for an in-progress environment refresh on another thread; they use the cached values
+  - See: https://github.com/MindscapeHQ/raygun4net/issues/584
 
 ### v11.2.6
 - Fix: Restore `netstandard2.0` dependency resolution for Mindscape.Raygun4Net.AspNetCore

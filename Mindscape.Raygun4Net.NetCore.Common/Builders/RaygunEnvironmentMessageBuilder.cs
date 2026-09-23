@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
@@ -12,16 +13,16 @@ namespace Mindscape.Raygun4Net
   {
     private static readonly RaygunEnvironmentMessage CachedMessage = new();
     internal static DateTime LastUpdate = DateTime.MinValue;
-    private static readonly SemaphoreSlim Semaphore = new(1, 1);
+    internal static readonly SemaphoreSlim Semaphore = new(1, 1);
 
     public static RaygunEnvironmentMessage Build(RaygunSettingsBase settings)
     {
       try
       {
-        if (LastUpdate < DateTime.UtcNow.AddMinutes(-2))
+        // Don't wait for a refresh running on another thread: a slow provider (e.g. an unreachable drive)
+        // would otherwise block every report. Return the cached values instead.
+        if (LastUpdate < DateTime.UtcNow.AddMinutes(-2) && Semaphore.Wait(0))
         {
-          Semaphore.Wait();
-          
           try
           {
             if (LastUpdate == DateTime.MinValue)
@@ -66,7 +67,8 @@ namespace Mindscape.Raygun4Net
         AvailableVirtualMemory = CachedMessage.AvailableVirtualMemory,
         TotalPhysicalMemory = CachedMessage.TotalPhysicalMemory,
         TotalVirtualMemory = CachedMessage.TotalVirtualMemory,
-        DiskSpaceFree = CachedMessage.DiskSpaceFree.ToList(),
+        // Null until the first refresh completes, which another thread may still be running.
+        DiskSpaceFree = CachedMessage.DiskSpaceFree?.ToList() ?? new List<double>(),
         WindowBoundsHeight = CachedMessage.WindowBoundsHeight,
         WindowBoundsWidth = CachedMessage.WindowBoundsWidth,
         Locale = CachedMessage.Locale,
