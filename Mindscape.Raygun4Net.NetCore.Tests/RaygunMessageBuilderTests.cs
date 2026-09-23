@@ -168,6 +168,79 @@ namespace Mindscape.Raygun4Net.NetCore.Tests
     }
 
     [Test]
+    public void EnvironmentBuild_WhenCacheIsFresh_DoesNotRefreshOrHoldSemaphore()
+    {
+      RaygunEnvironmentMessageBuilder.Build(_settings);
+      var freshUpdate = DateTime.UtcNow.AddSeconds(-30);
+      RaygunEnvironmentMessageBuilder.LastUpdate = freshUpdate;
+
+      RaygunEnvironmentMessageBuilder.Build(_settings);
+
+      RaygunEnvironmentMessageBuilder.LastUpdate.Should().Be(freshUpdate);
+      RaygunEnvironmentMessageBuilder.Semaphore.CurrentCount.Should().Be(1);
+    }
+
+    [Test]
+    public void EnvironmentBuild_WhenRefreshInProgressOnAnotherThread_ReturnsPreviouslyCachedValues()
+    {
+      RaygunEnvironmentMessageBuilder.Build(_settings);
+      RaygunEnvironmentMessageBuilder.LastUpdate = DateTime.UtcNow.AddMinutes(-5);
+
+      RaygunEnvironmentMessageBuilder.Semaphore.Wait();
+      try
+      {
+        var build = Task.Run(() => RaygunEnvironmentMessageBuilder.Build(_settings));
+        build.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+
+        build.Result.OSVersion.Should().NotBeNullOrEmpty();
+        build.Result.ProcessorCount.Should().BeGreaterThan(0);
+        build.Result.TotalPhysicalMemory.Should().NotBe(0);
+      }
+      finally
+      {
+        RaygunEnvironmentMessageBuilder.Semaphore.Release();
+      }
+    }
+
+    [Test]
+    public void EnvironmentBuild_AfterSkippedRefresh_RefreshesOnceSemaphoreIsFree()
+    {
+      RaygunEnvironmentMessageBuilder.Build(_settings);
+      RaygunEnvironmentMessageBuilder.LastUpdate = DateTime.UtcNow.AddMinutes(-5);
+
+      RaygunEnvironmentMessageBuilder.Semaphore.Wait();
+      try
+      {
+        Task.Run(() => RaygunEnvironmentMessageBuilder.Build(_settings)).Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+      }
+      finally
+      {
+        RaygunEnvironmentMessageBuilder.Semaphore.Release();
+      }
+
+      RaygunEnvironmentMessageBuilder.Build(_settings);
+
+      RaygunEnvironmentMessageBuilder.LastUpdate.Should().BeCloseTo(DateTime.UtcNow, TimeSpan.FromSeconds(10));
+    }
+
+    [Test]
+    public async Task EnvironmentBuild_WhenFirstBuildIsCalledConcurrently_NeverThrowsAndReleasesSemaphore()
+    {
+      GetCachedEnvironmentMessage().DiskSpaceFree = null;
+      RaygunEnvironmentMessageBuilder.LastUpdate = DateTime.MinValue;
+
+      var builds = Enumerable.Range(0, 50)
+                             .Select(_ => Task.Run(() => RaygunEnvironmentMessageBuilder.Build(_settings)))
+                             .ToArray();
+
+      var results = await Task.WhenAll(builds);
+
+      results.Should().OnlyContain(r => r.DiskSpaceFree != null);
+      RaygunEnvironmentMessageBuilder.Semaphore.CurrentCount.Should().Be(1);
+      RaygunEnvironmentMessageBuilder.LastUpdate.Should().BeCloseTo(DateTime.UtcNow, TimeSpan.FromSeconds(10));
+    }
+
+    [Test]
     public void EnvironmentBuild_AfterRefresh_ReleasesSemaphore()
     {
       RaygunEnvironmentMessageBuilder.Build(_settings);
