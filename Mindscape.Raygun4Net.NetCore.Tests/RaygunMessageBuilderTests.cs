@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -450,6 +451,160 @@ namespace Mindscape.Raygun4Net.NetCore.Tests
     }
 
     [Test]
+    public void EnvironmentBuild_AfterDiskProviderError_ReleasesSemaphore()
+    {
+      RaygunEnvironmentMessageBuilder.DiskSpaceProvider = () => throw new IOException("Disk error");
+
+      RaygunEnvironmentMessageBuilder.Build(_settings);
+
+      RaygunEnvironmentMessageBuilder.Semaphore.CurrentCount.Should().Be(1);
+    }
+
+    [Test]
+    public void EnvironmentBuild_WhenDiskProviderThrowsAfterIgnoringClientSkippedCheck_ReturnsErrorAndChecksOnce()
+    {
+      var calls = 0;
+      RaygunEnvironmentMessageBuilder.DiskSpaceProvider = () =>
+      {
+        Interlocked.Increment(ref calls);
+        throw new IOException("Disk error");
+      };
+
+      RaygunEnvironmentMessageBuilder.Build(new RaygunSettings { IsDiskSpaceFreeIgnored = true });
+
+      var result = RaygunEnvironmentMessageBuilder.Build(_settings);
+
+      result.DiskSpaceFree.Should().NotBeNull().And.BeEmpty();
+      result.DiskSpaceFreeStatus.Should().Be(DiskSpaceFreeStatuses.Error);
+
+      RaygunEnvironmentMessageBuilder.Build(_settings).DiskSpaceFreeStatus.Should().Be(DiskSpaceFreeStatuses.Error);
+      calls.Should().Be(1);
+    }
+
+    [Test]
+    public async Task EnvironmentBuild_WhenAnotherReportsRefreshFails_WaitsAndReturnsError()
+    {
+      using var providerStarted = new ManualResetEventSlim(false);
+      RaygunEnvironmentMessageBuilder.DiskSpaceTimeout = TimeSpan.FromSeconds(5);
+      RaygunEnvironmentMessageBuilder.DiskSpaceProvider = () =>
+      {
+        providerStarted.Set();
+        Thread.Sleep(300);
+        throw new IOException("Disk error");
+      };
+
+      var first = Task.Run(() => RaygunEnvironmentMessageBuilder.Build(_settings));
+      providerStarted.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+
+      var second = await Task.Run(() => RaygunEnvironmentMessageBuilder.Build(_settings));
+
+      second.DiskSpaceFree.Should().NotBeNull().And.BeEmpty();
+      second.DiskSpaceFreeStatus.Should().Be(DiskSpaceFreeStatuses.Error);
+      (await first).DiskSpaceFreeStatus.Should().Be(DiskSpaceFreeStatuses.Error);
+    }
+
+    [Test]
+    public void EnvironmentBuild_AfterDiskProviderError_LaterTimeoutReplacesStatus()
+    {
+      RaygunEnvironmentMessageBuilder.DiskSpaceProvider = () => throw new IOException("Disk error");
+      RaygunEnvironmentMessageBuilder.Build(_settings).DiskSpaceFreeStatus.Should().Be(DiskSpaceFreeStatuses.Error);
+
+      using var gate = new ManualResetEventSlim(false);
+      UseHangingDiskProvider(gate);
+      RaygunEnvironmentMessageBuilder.LastUpdate = DateTime.UtcNow.AddMinutes(-5);
+
+      try
+      {
+        RaygunEnvironmentMessageBuilder.Build(_settings).DiskSpaceFreeStatus.Should().Be(DiskSpaceFreeStatuses.TimedOut);
+      }
+      finally
+      {
+        gate.Set();
+      }
+    }
+
+    [Test]
+    public void EnvironmentBuild_WhenStuckCheckLaterThrowsWithinCacheWindow_StaysTimedOut()
+    {
+      using var gate = new ManualResetEventSlim(false);
+      UseThrowingAfterGateDiskProvider(gate);
+
+      RaygunEnvironmentMessageBuilder.Build(_settings).DiskSpaceFreeStatus.Should().Be(DiskSpaceFreeStatuses.TimedOut);
+
+      gate.Set();
+      SpinWait.SpinUntil(IsDiskCheckFinished, TimeSpan.FromSeconds(5)).Should().BeTrue();
+
+      var result = RaygunEnvironmentMessageBuilder.Build(_settings);
+
+      result.DiskSpaceFree.Should().BeEmpty();
+      result.DiskSpaceFreeStatus.Should().Be(DiskSpaceFreeStatuses.TimedOut);
+    }
+
+    [Test]
+    public void EnvironmentBuild_AfterStuckCheckLaterThrows_NextRefreshStartsNewCheck()
+    {
+      using var gate = new ManualResetEventSlim(false);
+      UseThrowingAfterGateDiskProvider(gate);
+
+      RaygunEnvironmentMessageBuilder.Build(_settings);
+
+      gate.Set();
+      SpinWait.SpinUntil(IsDiskCheckFinished, TimeSpan.FromSeconds(5)).Should().BeTrue();
+
+      RaygunEnvironmentMessageBuilder.DiskSpaceProvider = () => new List<double> { 7 };
+      RaygunEnvironmentMessageBuilder.LastUpdate = DateTime.UtcNow.AddMinutes(-5);
+
+      var result = RaygunEnvironmentMessageBuilder.Build(_settings);
+
+      result.DiskSpaceFree.Should().Equal(7);
+      result.DiskSpaceFreeStatus.Should().BeNull();
+    }
+
+    [Test]
+    public void EnvironmentBuild_WhenStuckCheckLaterThrows_DoesNotRaiseUnobservedTaskException()
+    {
+      // RaygunClient reports unobserved task exceptions as crashes, so a failed check nobody waited on must not raise one
+      var unobserved = new ConcurrentBag<Exception>();
+      EventHandler<UnobservedTaskExceptionEventArgs> onUnobserved = (_, args) =>
+      {
+        if (args.Exception.InnerExceptions.Any(e => e.Message == "Late disk error"))
+        {
+          unobserved.Add(args.Exception);
+        }
+      };
+
+      TaskScheduler.UnobservedTaskException += onUnobserved;
+
+      try
+      {
+        using var gate = new ManualResetEventSlim(false);
+        UseThrowingAfterGateDiskProvider(gate);
+
+        RaygunEnvironmentMessageBuilder.Build(_settings).DiskSpaceFreeStatus.Should().Be(DiskSpaceFreeStatuses.TimedOut);
+
+        gate.Set();
+        SpinWait.SpinUntil(IsDiskCheckFinished, TimeSpan.FromSeconds(5)).Should().BeTrue();
+
+        // Replace the failed check so nothing references it any more
+        RaygunEnvironmentMessageBuilder.DiskSpaceProvider = () => new List<double> { 7 };
+        RaygunEnvironmentMessageBuilder.LastUpdate = DateTime.UtcNow.AddMinutes(-5);
+        RaygunEnvironmentMessageBuilder.Build(_settings);
+
+        for (var i = 0; i < 5; i++)
+        {
+          GC.Collect();
+          GC.WaitForPendingFinalizers();
+        }
+
+        unobserved.Should().BeEmpty();
+      }
+      finally
+      {
+        TaskScheduler.UnobservedTaskException -= onUnobserved;
+      }
+    }
+
+    [Test]
     public void EnvironmentBuild_WhenDiskCheckCollectsNormally_HasNoStatus()
     {
       RaygunEnvironmentMessageBuilder.DiskSpaceProvider = () => new List<double> { 42, 43 };
@@ -641,6 +796,17 @@ namespace Mindscape.Raygun4Net.NetCore.Tests
       };
 
       return () => Volatile.Read(ref calls);
+    }
+
+    // The disk check blocks until the gate is set, then fails, as a stalled drive read that eventually errors would
+    private static void UseThrowingAfterGateDiskProvider(ManualResetEventSlim gate)
+    {
+      RaygunEnvironmentMessageBuilder.DiskSpaceTimeout = TestDiskSpaceTimeout;
+      RaygunEnvironmentMessageBuilder.DiskSpaceProvider = () =>
+      {
+        gate.Wait();
+        throw new IOException("Late disk error");
+      };
     }
 
     private static bool IsDiskCheckFinished()

@@ -252,6 +252,80 @@ namespace Mindscape.Raygun4Net.NetCore.Tests
 
     [Test]
     [NonParallelizable]
+    public async Task SendInBackground_WhenDiskCheckFails_SendsReportMarkedError()
+    {
+      // Match the body when the request is sent: the client disposes the request content afterwards
+      _mockHttp.When(match => match.Method(HttpMethod.Post)
+        .RequestUri("https://api.raygun.com/entries")
+        .PartialBody("\"DiskSpaceFree\":[]")
+        .PartialBody("\"DiskSpaceFreeStatus\":\"Error\""))
+        .Respond(x =>
+        {
+          x.Body("OK");
+          x.StatusCode(HttpStatusCode.Accepted);
+        }).Verifiable();
+
+      _httpClient = new HttpClient(_mockHttp);
+
+      var client = new BananaClient(new RaygunSettings
+      {
+        ApiKey = "banana"
+      }, _httpClient);
+
+      RaygunEnvironmentMessageBuilder.ResetForTests();
+      RaygunEnvironmentMessageBuilder.DiskSpaceProvider = () => throw new IOException("Disk error");
+      try
+      {
+        await client.SendInBackground(new Exception("Test Exception when the disk check fails"));
+
+        // Delay 1 second to give it time to send the message
+        await Task.Delay(1000);
+      }
+      finally
+      {
+        RaygunEnvironmentMessageBuilder.ResetForTests();
+      }
+
+      // Fails if the only request sent did not contain the expected body
+      _mockHttp.Verify();
+      await _mockHttp.VerifyAsync(match => match.Method(HttpMethod.Post)
+        .RequestUri("https://api.raygun.com/entries"), IsSent.Exactly(1));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task SendAsync_WhenOfflineAndDiskCheckFails_SavesReportMarkedError()
+    {
+      _mockHttp.When(match => match.Method(HttpMethod.Post)
+        .RequestUri("https://api.raygun.com/entries"))
+        .Throws<HttpRequestException>();
+
+      _httpClient = new HttpClient(_mockHttp);
+
+      var store = new RecordingOfflineStore();
+      var client = new BananaClient(new RaygunSettings
+      {
+        ApiKey = "banana",
+        OfflineStore = store
+      }, _httpClient);
+
+      RaygunEnvironmentMessageBuilder.ResetForTests();
+      RaygunEnvironmentMessageBuilder.DiskSpaceProvider = () => throw new IOException("Disk error");
+      try
+      {
+        await client.SendAsync(new Exception("Test Exception while offline and the disk check fails"));
+      }
+      finally
+      {
+        RaygunEnvironmentMessageBuilder.ResetForTests();
+      }
+
+      store.SavedPayloads.Should().ContainSingle()
+           .Which.Should().Contain("\"DiskSpaceFreeStatus\":\"Error\"");
+    }
+
+    [Test]
+    [NonParallelizable]
     public async Task SendAsync_WhenDiskCheckFails_SendsReportMarkedError()
     {
       // Match the body when the request is sent: the client disposes the request content afterwards
