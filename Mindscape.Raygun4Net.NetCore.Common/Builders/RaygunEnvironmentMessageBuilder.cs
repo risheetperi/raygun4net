@@ -239,7 +239,13 @@ namespace Mindscape.Raygun4Net
     {
       // LongRunning gives the check its own background thread rather than a thread-pool one: a stuck check then never
       // ties up a pool thread, and doesn't keep the process alive when the app exits.
-      return Task.Factory.StartNew(provider, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+      var task = Task.Factory.StartNew(provider, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+      // A check that fails after its report stopped waiting is never waited on again. Observe the failure so it isn't
+      // raised as an UnobservedTaskException, which RaygunClient would send as a crash report of its own.
+      task.ContinueWith(t => _ = t.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+
+      return task;
     }
 
     internal static void ResetForTests()
