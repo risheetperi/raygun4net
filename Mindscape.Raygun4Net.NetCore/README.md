@@ -128,6 +128,21 @@ var raygunClient = new RaygunClient(new RaygunSettings()
 
 You may extend and create your own custom implementations of `OfflineStoreBase` and `IBackgroundSendStrategy` to further customize where errors are stored, and when they are sent.
 
+Disk space
+----------
+
+Each crash report includes the machine's free disk space: every local drive on Windows, and the root volume on Linux and macOS. The disk check has a 5 second limit. If it takes longer, for example because a disk isn't responding, the report is sent (or stored offline) without disk space, and `DiskSpaceFreeStatus` is set to `"TimedOut"` in the report's environment details.
+
+To turn off disk space collection completely, set `IsDiskSpaceFreeIgnored`. Reports then have `DiskSpaceFreeStatus` set to `"Ignored"`.
+
+```csharp
+var raygunClient = new RaygunClient(new RaygunSettings()
+{
+  ApiKey = "paste_your_api_key_here",
+  IsDiskSpaceFreeIgnored = true
+});
+```
+
 Tags and custom data
 --------------------
 
