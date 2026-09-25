@@ -5,23 +5,44 @@ using System.Globalization;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Threading.Tasks;
 using Mindscape.Raygun4Net.EnvironmentProviders;
 
 namespace Mindscape.Raygun4Net
 {
   public class RaygunEnvironmentMessageBuilder
   {
+    private static readonly TimeSpan DefaultDiskSpaceTimeout = TimeSpan.FromSeconds(5);
+
     private static readonly RaygunEnvironmentMessage CachedMessage = new();
     internal static DateTime LastUpdate = DateTime.MinValue;
     internal static readonly SemaphoreSlim Semaphore = new(1, 1);
 
+    // How long a report waits for disk space before it is sent without it. DriveInfo calls can't be cancelled, so
+    // the check runs on its own background thread and is abandoned (not killed) when this runs out.
+    internal static TimeSpan DiskSpaceTimeout = DefaultDiskSpaceTimeout;
+    internal static Func<List<double>> DiskSpaceProvider = DiskProvider.GetDiskSpace;
+    private static Task<List<double>> _diskSpaceTask;
+    private static DateTime _diskSpaceTaskStartedUtc;
+
+    // Why the cached disk space is empty (null when it was collected), and whether the last refresh skipped the disk
+    // check because the client that ran it ignores disk space
+    private static string _diskSpaceFreeStatus;
+    private static bool _diskSpaceCheckSkipped;
+
     public static RaygunEnvironmentMessage Build(RaygunSettingsBase settings)
     {
+      var isDiskSpaceIgnored = settings?.IsDiskSpaceFreeIgnored == true;
+      var staleBefore = DateTime.UtcNow.AddMinutes(-2);
+
       try
       {
-        // Don't wait for a refresh running on another thread: a slow provider (e.g. an unreachable drive)
-        // would otherwise block every report. Return the cached values instead.
-        if (LastUpdate < DateTime.UtcNow.AddMinutes(-2) && Semaphore.Wait(0))
+        // Wait for a refresh running on another thread so this report gets fresh values. That refresh waits at most
+        // DiskSpaceTimeout for disks, plus the other providers (normally well under a second), so allow twice the
+        // disk timeout before giving up and returning what's cached.
+        var needsRefresh = LastUpdate < staleBefore || (!isDiskSpaceIgnored && _diskSpaceCheckSkipped);
+
+        if (needsRefresh && Semaphore.Wait(DiskSpaceTimeout + DiskSpaceTimeout))
         {
           try
           {
@@ -40,6 +61,12 @@ namespace Mindscape.Raygun4Net
               Update(settings);
               LastUpdate = DateTime.UtcNow;
             }
+
+            // The last refresh was run by a client that ignores disk space, so collect it for this one
+            if (!isDiskSpaceIgnored && _diskSpaceCheckSkipped)
+            {
+              UpdateDiskSpace();
+            }
           }
           catch (Exception e)
           {
@@ -56,6 +83,26 @@ namespace Mindscape.Raygun4Net
         // Ignore - if an error occurs lets just return what we have and carry on, this is less important than not logging the error
       }
 
+      List<double> diskSpaceFree;
+      string diskSpaceFreeStatus;
+
+      if (isDiskSpaceIgnored)
+      {
+        diskSpaceFree = new List<double>();
+        diskSpaceFreeStatus = DiskSpaceFreeStatuses.Ignored;
+      }
+      else if (LastUpdate < staleBefore || _diskSpaceCheckSkipped)
+      {
+        // Couldn't refresh in time: don't send old disk space, as the disk may have filled up since
+        diskSpaceFree = new List<double>();
+        diskSpaceFreeStatus = DiskSpaceFreeStatuses.TimedOut;
+      }
+      else
+      {
+        diskSpaceFree = CachedMessage.DiskSpaceFree?.ToList() ?? new List<double>();
+        diskSpaceFreeStatus = _diskSpaceFreeStatus;
+      }
+
       // Return a copy of the cached message to avoid outside changes
       return new RaygunEnvironmentMessage
       {
@@ -67,8 +114,8 @@ namespace Mindscape.Raygun4Net
         AvailableVirtualMemory = CachedMessage.AvailableVirtualMemory,
         TotalPhysicalMemory = CachedMessage.TotalPhysicalMemory,
         TotalVirtualMemory = CachedMessage.TotalVirtualMemory,
-        // Null until the first refresh completes, which another thread may still be running.
-        DiskSpaceFree = CachedMessage.DiskSpaceFree?.ToList() ?? new List<double>(),
+        DiskSpaceFree = diskSpaceFree,
+        DiskSpaceFreeStatus = diskSpaceFreeStatus,
         WindowBoundsHeight = CachedMessage.WindowBoundsHeight,
         WindowBoundsWidth = CachedMessage.WindowBoundsWidth,
         Locale = CachedMessage.Locale,
@@ -112,27 +159,113 @@ namespace Mindscape.Raygun4Net
 
     private static void Update(RaygunSettingsBase settings)
     {
+      // Memory first, so a report that stops waiting for a slow disk check still gets it
       try
       {
-        CachedMessage.DiskSpaceFree = DiskProvider.GetDiskSpace();
-
         var memory = MemoryProvider.GetTotalMemory();
 
-        if (!memory.HasValue)
+        if (memory.HasValue)
         {
-          return;
+          CachedMessage.TotalPhysicalMemory = memory.Value.TotalMemory;
+          CachedMessage.AvailablePhysicalMemory = memory.Value.AvailableMemory;
+          CachedMessage.TotalVirtualMemory = memory.Value.TotalVirtualMemory;
+          CachedMessage.AvailableVirtualMemory = memory.Value.AvailableVirtualMemory;
+          CachedMessage.EnvironmentVariables = EnvironmentVariablesProvider.GetEnvironmentVariables(settings);
         }
-
-        CachedMessage.TotalPhysicalMemory = memory.Value.TotalMemory;
-        CachedMessage.AvailablePhysicalMemory = memory.Value.AvailableMemory;
-        CachedMessage.TotalVirtualMemory = memory.Value.TotalVirtualMemory;
-        CachedMessage.AvailableVirtualMemory = memory.Value.AvailableVirtualMemory;
-        CachedMessage.EnvironmentVariables = EnvironmentVariablesProvider.GetEnvironmentVariables(settings);
       }
       catch
       {
         // Ignore
       }
+
+      if (settings?.IsDiskSpaceFreeIgnored == true)
+      {
+        _diskSpaceCheckSkipped = true;
+      }
+      else
+      {
+        UpdateDiskSpace();
+      }
     }
+
+    // Must be called while holding Semaphore
+    private static void UpdateDiskSpace()
+    {
+      var collected = TryGetDiskSpace(out var diskSpaceFree);
+
+      if (collected)
+      {
+        CachedMessage.DiskSpaceFree = diskSpaceFree;
+        _diskSpaceFreeStatus = null;
+      }
+      else
+      {
+        // Clear the old values rather than keep sending them, as the disk may have filled up since
+        CachedMessage.DiskSpaceFree = new List<double>();
+        _diskSpaceFreeStatus = DiskSpaceFreeStatuses.TimedOut;
+      }
+
+      // Only once the result is cached: until then, other reports still see the skip and wait for this result
+      // rather than sending the old cached values
+      _diskSpaceCheckSkipped = false;
+    }
+
+    // Must be called while holding Semaphore. Returns false if the check didn't finish within DiskSpaceTimeout.
+    private static bool TryGetDiskSpace(out List<double> diskSpaceFree)
+    {
+      // Only one check runs at a time: if an earlier check is still stuck, keep waiting on that one rather than
+      // starting another thread that would get stuck too.
+      if (_diskSpaceTask == null || _diskSpaceTask.IsCompleted)
+      {
+        _diskSpaceTask = StartDiskSpaceCheck(DiskSpaceProvider);
+        _diskSpaceTaskStartedUtc = DateTime.UtcNow;
+      }
+
+      // Measured from when the check started, so a check that is already stuck doesn't delay every later refresh
+      // by the full timeout again.
+      var remaining = DiskSpaceTimeout - (DateTime.UtcNow - _diskSpaceTaskStartedUtc);
+
+      try
+      {
+        if (!_diskSpaceTask.Wait(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero))
+        {
+          diskSpaceFree = null;
+          return false;
+        }
+
+        diskSpaceFree = _diskSpaceTask.Result ?? new List<double>();
+      }
+      catch
+      {
+        // The provider threw, so the check did finish: report no disks rather than a timeout
+        diskSpaceFree = new List<double>();
+      }
+
+      return true;
+    }
+
+    private static Task<List<double>> StartDiskSpaceCheck(Func<List<double>> provider)
+    {
+      // LongRunning gives the check its own background thread rather than a thread-pool one: a stuck check then never
+      // ties up a pool thread, and doesn't keep the process alive when the app exits.
+      return Task.Factory.StartNew(provider, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+    }
+
+    internal static void ResetForTests()
+    {
+      LastUpdate = DateTime.MinValue;
+      DiskSpaceTimeout = DefaultDiskSpaceTimeout;
+      DiskSpaceProvider = DiskProvider.GetDiskSpace;
+      _diskSpaceTask = null;
+      _diskSpaceTaskStartedUtc = DateTime.MinValue;
+      _diskSpaceFreeStatus = null;
+      _diskSpaceCheckSkipped = false;
+    }
+  }
+
+  internal static class DiskSpaceFreeStatuses
+  {
+    public const string TimedOut = "TimedOut";
+    public const string Ignored = "Ignored";
   }
 }
