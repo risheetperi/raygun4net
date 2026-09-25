@@ -2,6 +2,7 @@
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Threading;
@@ -237,6 +238,45 @@ namespace Mindscape.Raygun4Net.NetCore.Tests
       try
       {
         await client.SendAsync(new Exception("Test Exception with disk space ignored"));
+      }
+      finally
+      {
+        RaygunEnvironmentMessageBuilder.ResetForTests();
+      }
+
+      // Fails if the only request sent did not contain the expected body
+      _mockHttp.Verify();
+      await _mockHttp.VerifyAsync(match => match.Method(HttpMethod.Post)
+        .RequestUri("https://api.raygun.com/entries"), IsSent.Exactly(1));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task SendAsync_WhenDiskCheckFails_SendsReportMarkedError()
+    {
+      // Match the body when the request is sent: the client disposes the request content afterwards
+      _mockHttp.When(match => match.Method(HttpMethod.Post)
+        .RequestUri("https://api.raygun.com/entries")
+        .PartialBody("\"DiskSpaceFree\":[]")
+        .PartialBody("\"DiskSpaceFreeStatus\":\"Error\""))
+        .Respond(x =>
+        {
+          x.Body("OK");
+          x.StatusCode(HttpStatusCode.Accepted);
+        }).Verifiable();
+
+      _httpClient = new HttpClient(_mockHttp);
+
+      var client = new BananaClient(new RaygunSettings
+      {
+        ApiKey = "banana"
+      }, _httpClient);
+
+      RaygunEnvironmentMessageBuilder.ResetForTests();
+      RaygunEnvironmentMessageBuilder.DiskSpaceProvider = () => throw new IOException("Disk error");
+      try
+      {
+        await client.SendAsync(new Exception("Test Exception when the disk check fails"));
       }
       finally
       {

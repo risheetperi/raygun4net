@@ -12,6 +12,7 @@
 - Fix: #584 - `SendInBackground` could block indefinitely while collecting disk space on Windows when a mapped network drive was unavailable
   - Mindscape.Raygun4Net.NetCore.Common: disk-space collection checks the drive type before readiness, so drives that are not reported (e.g. network drives, non-root mounts) are no longer probed
   - Mindscape.Raygun4Net.NetCore.Common: disk space is collected on a background thread with a 5 second limit. If it runs out, the report is sent (or stored offline) with an empty `DiskSpaceFree` and `DiskSpaceFreeStatus` set to `"TimedOut"`, instead of stale values
+  - Mindscape.Raygun4Net.NetCore.Common: if the disk check fails, the report has an empty `DiskSpaceFree` and `DiskSpaceFreeStatus` set to `"Error"`
   - Mindscape.Raygun4Net.NetCore.Common: reports that arrive while another report is collecting environment details wait for the fresh values instead of skipping them, for up to twice the disk limit
   - See: https://github.com/MindscapeHQ/raygun4net/pull/585
 - Feature: `IsDiskSpaceFreeIgnored` setting turns off disk space collection

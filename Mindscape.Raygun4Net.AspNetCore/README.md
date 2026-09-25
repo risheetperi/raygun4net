@@ -183,7 +183,7 @@ When enabled, Raygun also excludes known client-IP forwarding headers, such as `
 Disk space
 ----------
 
-Each crash report includes the machine's free disk space: every local drive on Windows, and the root volume on Linux and macOS. The disk check has a 5 second limit. If it takes longer, for example because a disk isn't responding, the report is sent without disk space, and `DiskSpaceFreeStatus` is set to `"TimedOut"` in the report's environment details.
+Each crash report includes the machine's free disk space: every local drive on Windows, and the root volume on Linux and macOS. The disk check has a 5 second limit. If it takes longer, for example because a disk isn't responding, the report is sent without disk space, and `DiskSpaceFreeStatus` is set to `"TimedOut"` in the report's environment details. If the disk check fails, `DiskSpaceFreeStatus` is set to `"Error"`.
 
 To turn off disk space collection completely, set `IsDiskSpaceFreeIgnored`. Reports then have `DiskSpaceFreeStatus` set to `"Ignored"`.
 

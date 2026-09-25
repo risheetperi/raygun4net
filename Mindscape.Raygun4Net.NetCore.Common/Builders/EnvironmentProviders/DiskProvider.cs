@@ -7,29 +7,22 @@ namespace Mindscape.Raygun4Net.EnvironmentProviders
 {
   internal static class DiskProvider
   {
+    // Errors aren't caught here: RaygunEnvironmentMessageBuilder catches them and marks the report's disk space as Error
     public static List<double> GetDiskSpace()
     {
-      try
+      if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
       {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-        {
-          return GetOnWindows();
-        }
-
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-        {
-          return GetOnLinux();
-        }
-
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-        {
-          return GetOnMacOS();
-        }
-
+        return GetOnWindows();
       }
-      catch
+
+      if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
       {
-        // Ignore
+        return GetOnLinux();
+      }
+
+      if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+      {
+        return GetOnMacOS();
       }
 
       return new List<double>();

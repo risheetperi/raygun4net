@@ -392,14 +392,61 @@ namespace Mindscape.Raygun4Net.NetCore.Tests
     }
 
     [Test]
-    public void EnvironmentBuild_WhenDiskProviderThrows_ReturnsEmptyDiskSpaceWithoutTimeoutStatus()
+    public void EnvironmentBuild_WhenDiskProviderThrows_ReturnsEmptyDiskSpaceWithErrorStatus()
     {
       RaygunEnvironmentMessageBuilder.DiskSpaceProvider = () => throw new IOException("Disk error");
 
       var result = RaygunEnvironmentMessageBuilder.Build(_settings);
 
       result.DiskSpaceFree.Should().NotBeNull().And.BeEmpty();
+      result.DiskSpaceFreeStatus.Should().Be(DiskSpaceFreeStatuses.Error);
+    }
+
+    [Test]
+    public void EnvironmentBuild_WhenDiskProviderThrowsAfterCollecting_DoesNotSendOldDiskSpace()
+    {
+      RaygunEnvironmentMessageBuilder.DiskSpaceProvider = () => new List<double> { 42 };
+      RaygunEnvironmentMessageBuilder.Build(_settings);
+
+      RaygunEnvironmentMessageBuilder.DiskSpaceProvider = () => throw new IOException("Disk error");
+      RaygunEnvironmentMessageBuilder.LastUpdate = DateTime.UtcNow.AddMinutes(-5);
+
+      var result = RaygunEnvironmentMessageBuilder.Build(_settings);
+
+      result.DiskSpaceFree.Should().BeEmpty();
+      result.DiskSpaceFreeStatus.Should().Be(DiskSpaceFreeStatuses.Error);
+    }
+
+    [Test]
+    public void EnvironmentBuild_AfterDiskProviderError_NextSuccessfulCheckClearsStatus()
+    {
+      RaygunEnvironmentMessageBuilder.DiskSpaceProvider = () => throw new IOException("Disk error");
+      RaygunEnvironmentMessageBuilder.Build(_settings).DiskSpaceFreeStatus.Should().Be(DiskSpaceFreeStatuses.Error);
+
+      RaygunEnvironmentMessageBuilder.DiskSpaceProvider = () => new List<double> { 7 };
+      RaygunEnvironmentMessageBuilder.LastUpdate = DateTime.UtcNow.AddMinutes(-5);
+
+      var result = RaygunEnvironmentMessageBuilder.Build(_settings);
+
+      result.DiskSpaceFree.Should().Equal(7);
       result.DiskSpaceFreeStatus.Should().BeNull();
+    }
+
+    [Test]
+    public void EnvironmentBuild_AfterDiskProviderErrorWithinCacheWindow_StaysErrorWithoutCheckingAgain()
+    {
+      var calls = 0;
+      RaygunEnvironmentMessageBuilder.DiskSpaceProvider = () =>
+      {
+        Interlocked.Increment(ref calls);
+        throw new IOException("Disk error");
+      };
+
+      RaygunEnvironmentMessageBuilder.Build(_settings);
+      var result = RaygunEnvironmentMessageBuilder.Build(_settings);
+
+      result.DiskSpaceFreeStatus.Should().Be(DiskSpaceFreeStatuses.Error);
+      calls.Should().Be(1);
     }
 
     [Test]

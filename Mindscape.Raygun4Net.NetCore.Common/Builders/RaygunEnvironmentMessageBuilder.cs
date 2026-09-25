@@ -191,27 +191,18 @@ namespace Mindscape.Raygun4Net
     // Must be called while holding Semaphore
     private static void UpdateDiskSpace()
     {
-      var collected = TryGetDiskSpace(out var diskSpaceFree);
-
-      if (collected)
-      {
-        CachedMessage.DiskSpaceFree = diskSpaceFree;
-        _diskSpaceFreeStatus = null;
-      }
-      else
-      {
-        // Clear the old values rather than keep sending them, as the disk may have filled up since
-        CachedMessage.DiskSpaceFree = new List<double>();
-        _diskSpaceFreeStatus = DiskSpaceFreeStatuses.TimedOut;
-      }
+      // On a timeout or error this clears the old values rather than keep sending them, as the disk may have filled up since
+      _diskSpaceFreeStatus = GetDiskSpace(out var diskSpaceFree);
+      CachedMessage.DiskSpaceFree = diskSpaceFree;
 
       // Only once the result is cached: until then, other reports still see the skip and wait for this result
       // rather than sending the old cached values
       _diskSpaceCheckSkipped = false;
     }
 
-    // Must be called while holding Semaphore. Returns false if the check didn't finish within DiskSpaceTimeout.
-    private static bool TryGetDiskSpace(out List<double> diskSpaceFree)
+    // Must be called while holding Semaphore. Returns null if disk space was collected, TimedOut if the check didn't
+    // finish within DiskSpaceTimeout, or Error if it failed.
+    private static string GetDiskSpace(out List<double> diskSpaceFree)
     {
       // Only one check runs at a time: if an earlier check is still stuck, keep waiting on that one rather than
       // starting another thread that would get stuck too.
@@ -229,19 +220,19 @@ namespace Mindscape.Raygun4Net
       {
         if (!_diskSpaceTask.Wait(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero))
         {
-          diskSpaceFree = null;
-          return false;
+          diskSpaceFree = new List<double>();
+          return DiskSpaceFreeStatuses.TimedOut;
         }
 
         diskSpaceFree = _diskSpaceTask.Result ?? new List<double>();
+        return null;
       }
       catch
       {
-        // The provider threw, so the check did finish: report no disks rather than a timeout
+        // The provider threw, so the check did finish but couldn't read the disks
         diskSpaceFree = new List<double>();
+        return DiskSpaceFreeStatuses.Error;
       }
-
-      return true;
     }
 
     private static Task<List<double>> StartDiskSpaceCheck(Func<List<double>> provider)
@@ -267,5 +258,6 @@ namespace Mindscape.Raygun4Net
   {
     public const string TimedOut = "TimedOut";
     public const string Ignored = "Ignored";
+    public const string Error = "Error";
   }
 }
